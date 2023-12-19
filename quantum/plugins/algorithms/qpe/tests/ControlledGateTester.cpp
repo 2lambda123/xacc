@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
+#include "Utils.hpp"
 #include "xacc.hpp"
 #include "xacc_service.hpp"
 #include "CommonGates.hpp"
 #include <Eigen/Dense>
+#include <memory>
 #include "CountGatesOfTypeVisitor.hpp"
 #include "GateFusion.hpp"
-
+#include "GateModifier.hpp"
 using namespace xacc;
 using namespace xacc::quantum;
 
@@ -446,6 +448,84 @@ TEST(ControlledGateTester, checkMultipleControlGrayCodeGen) {
   // 5 bits: run all test cases (8)
   for (int i = 0; i < (1 << 5); ++i) {
     runTestCase(i & 0x001, i & 0x002, i & 0x004, i & 0x008, i & 0x010);
+  }
+}
+
+TEST(ControlledGateTester, checkMultipleControlRollup) {
+  auto gateRegistry = xacc::getService<xacc::IRProvider>("quantum");
+  {
+    // Test that we can convert control(CZ) ==> MCZ where we can do Gray code
+    // circuit gen
+    auto cz = std::make_shared<CZ>(0, 4);
+    std::shared_ptr<xacc::CompositeInstruction> comp =
+        gateRegistry->createComposite("__COMPOSITE__Z");
+    comp->addInstruction(cz);
+    const std::vector<int> ctrl_idxs{1, 2, 3};
+    auto multi_ctrl_z = std::dynamic_pointer_cast<CompositeInstruction>(
+        xacc::getService<Instruction>("C-U"));
+    multi_ctrl_z->expand({{"U", comp}, {"control-idx", ctrl_idxs}});
+    xacc::quantum::CountGatesOfTypeVisitor<CNOT> vis(multi_ctrl_z);
+    xacc::quantum::CountGatesOfTypeVisitor<U> visu(multi_ctrl_z);
+    EXPECT_EQ(vis.countGates(), 44);
+    EXPECT_EQ(visu.countGates(), 52);
+  }
+  {
+    // Nesting of C-U circuits should also work
+    auto z = std::make_shared<Z>(4);
+    std::shared_ptr<xacc::CompositeInstruction> comp1 =
+        gateRegistry->createComposite("__COMPOSITE__Z1");
+    comp1->addInstruction(z);
+    auto ctrl_z = std::dynamic_pointer_cast<CompositeInstruction>(
+        xacc::getService<Instruction>("C-U"));
+    const std::vector<int> ctrl_idxs_1{0};
+    ctrl_z->expand({{"U", comp1}, {"control-idx", ctrl_idxs_1}});
+
+    std::shared_ptr<xacc::CompositeInstruction> comp =
+        gateRegistry->createComposite("__COMPOSITE__Z");
+    comp->addInstruction(ctrl_z);
+    const std::vector<int> ctrl_idxs{1, 2, 3};
+    auto multi_ctrl_z = std::dynamic_pointer_cast<CompositeInstruction>(
+        xacc::getService<Instruction>("C-U"));
+    multi_ctrl_z->expand({{"U", comp}, {"control-idx", ctrl_idxs}});
+    xacc::quantum::CountGatesOfTypeVisitor<CNOT> vis(multi_ctrl_z);
+    xacc::quantum::CountGatesOfTypeVisitor<U> visu(multi_ctrl_z);
+    EXPECT_EQ(vis.countGates(), 44);
+    EXPECT_EQ(visu.countGates(), 52);
+  }
+}
+
+TEST(ControlledGateTester, checkControlRollUpComplex) {
+  auto gateRegistry = xacc::getService<xacc::IRProvider>("quantum");
+  {
+    auto cz = std::make_shared<CZ>(1, 0);
+    auto cn = std::make_shared<CNOT>(1, 0);
+    std::shared_ptr<xacc::CompositeInstruction> comp =
+        gateRegistry->createComposite("__COMPOSITE__");
+    comp->addInstruction(cz);
+    comp->addInstruction(cn);
+    const std::vector<int> ctrl_idxs{2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                                     12, 13, 14, 15, 16, 17, 18, 19, 20};
+    auto multi_ctrl = std::dynamic_pointer_cast<CompositeInstruction>(
+        xacc::getService<Instruction>("C-U"));
+    multi_ctrl->expand(
+        {{"U", comp}, {"control-idx", ctrl_idxs}, {"skip-decompose", true}});
+    for (int i = 0; i < multi_ctrl->nInstructions(); ++i) {
+      auto inst = multi_ctrl->getInstruction(i);
+      EXPECT_EQ(inst->name(), "C-U");
+      auto ctlGate = std::dynamic_pointer_cast<ControlModifier>(inst);
+      EXPECT_TRUE(ctlGate != nullptr);
+      EXPECT_EQ(ctlGate->getControlQubits().size(), ctrl_idxs.size() + 1);
+      for (const auto &[reg, qId] : ctlGate->getControlQubits()) {
+        const bool isValid =
+            xacc::container::contains(ctrl_idxs, qId) || qId == 1;
+        EXPECT_TRUE(isValid);
+      }
+      auto baseInst = xacc::ir::asComposite(ctlGate->getBaseInstruction());
+      EXPECT_EQ(baseInst->nInstructions(), 1);
+      const std::vector<std::string> EXPECTED_BASE_GATE{"Z", "X"};
+      EXPECT_EQ(baseInst->getInstruction(0)->name(), EXPECTED_BASE_GATE[i]);
+      EXPECT_EQ(baseInst->getInstruction(0)->bits()[0], 0);
+    }
   }
 }
 
